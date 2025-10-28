@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-rectify.py  —  Automated Document Aligner (improved)
-
-Usage:
-    python3 rectify.py <input_folder>
-
-What changed vs your version:
-- CLAHE + Gaussian blur to stabilize contrast.
-- Two binary paths: (A) Canny edges, (B) adaptive threshold (handles textured backgrounds).
-- Rejects contours touching the image border (prevents picking the whole frame).
-- Scores 4-point candidates by area and rectangularity (angles ≈ 90°).
-- Keeps a minAreaRect fallback that also ignores border-touching contours.
-- Optional DEBUG overlay images: set DEBUG_DIR env var (e.g., DEBUG_DIR=./debug).
-"""
 
 import os
 import re
@@ -21,15 +7,18 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# ---------------- Constants ----------------
-OUT_W, OUT_H = 550, 425         # fixed output size
-MIN_AREA_FRAC = 0.05            # drop tiny contours
-CANNY_SIGMA = 0.33              # median heuristic
-BORDER_PAD = 5                  # px distance from frame to consider "touching"
-DEBUG_DIR = os.environ.get("DEBUG_DIR")  # if set, write overlays here
+# fixed output size
+OUT_W, OUT_H = 550, 425
+# drop tiny contours
+MIN_AREA_FRAC = 0.05
+# median heuristic
+CANNY_SIGMA = 0.33
+# px distance from frame to consider "touching"
+BORDER_PAD = 5
+# if set, write overlays here
+DEBUG_DIR = os.environ.get("DEBUG_DIR")
 
 
-# ---------------- Utils ----------------
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
