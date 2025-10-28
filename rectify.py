@@ -15,6 +15,7 @@ What changed vs your version:
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 import cv2
@@ -178,12 +179,16 @@ def process_folder(in_dir: Path, out_dir: Path):
         if img is None:
             print(f"Skipping unreadable file: {p.name}")
             continue
+        # Extract number from "input (5)" -> "5"
+        match = re.search(r'\((\d+)\)', p.stem)
+        num = match.group(1) if match else p.stem
+        
         rectified = warp_document(img)
         if rectified is None:
             print(f"[WARN] Could not find a document in: {p.name}")
-            cv2.imwrite(str(out_dir / f"FAILED_{p.stem}.jpg"), img)
+            cv2.imwrite(str(out_dir / f"FAILED_{num}.jpg"), img)
             continue
-        out_path = out_dir / f"output_{p.stem}.jpg"
+        out_path = out_dir / f"output ({num}).jpg"
         cv2.imwrite(str(out_path), rectified)
         print(f"Wrote {out_path.name}")
 
