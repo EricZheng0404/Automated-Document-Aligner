@@ -1,137 +1,145 @@
 # Automated Document Aligner - Midterm Project
 
 ## Overview
-This project implements an automated document rectification pipeline that detects documents in images with complex backgrounds and warps them to a canonical frontal view. The pipeline handles various challenging scenarios including textured backgrounds, varying lighting conditions, and documents at arbitrary orientations.
+This project implements a robust automated document rectification pipeline that detects documents in images with complex backgrounds and warps them to a canonical frontal view.
 
 ## High-Level Pipeline Description
 
-The rectification pipeline follows this sequence of operations:
+The rectification pipeline performs the following sequence of operations:
 
-1. **Preprocessing & Contrast Normalization**
-   - Convert input image to grayscale
-   - Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) for robust contrast enhancement
-   - Apply Gaussian blur to reduce noise while preserving edges
+1. **Preprocessing**: Convert input to grayscale and LAB color space; apply bilateral filtering
+2. **Binarization**: Apply cascading detection strategies (LAB+Otsu → Canny edges → Adaptive threshold → Global threshold)
+3. **Morphological Operations**: Apply closing to connect gaps, then erosion to shrink back to true edges
+4. **Contour Detection**: Extract external contours and filter by area and border proximity
+5. **Polygon Approximation**: Try multiple epsilon values to find 4-sided quadrilaterals
+6. **Validation & Scoring**: Score candidates by area, corner angles, and aspect ratio
+7. **Subpixel Refinement**: Refine corner positions to subpixel accuracy using `cv2.cornerSubPix`
+8. **Corner Ordering**: Order corners as Top-Left, Top-Right, Bottom-Right, Bottom-Left
+9. **Warping**: Apply 1% inward bias, compute homography, and warp with bicubic interpolation
 
-2. **Dual-Path Binarization**
-   - **Path A (Edge-based)**: Generate edge map using adaptive Canny edge detection
-   - **Path B (Region-based)**: Generate binary mask using adaptive thresholding
-
-3. **Morphological Operations**
-   - Apply closing operation to connect gaps in edges/regions
-   - Perform dilation to strengthen detected features
-   - Kernel size is dynamically scaled to 1% of image dimensions
-
-4. **Contour Detection & Filtering**
-   - Extract contours from both binary paths
-   - Filter out contours that:
-     - Are too small (< 5% of image area)
-     - Touch the image border (within 5px)
-     - Don't approximate to 4-sided polygons
-
-5. **Corner Localization & Candidate Scoring**
-   - Approximate each contour to a quadrilateral using Douglas-Peucker algorithm
-   - Score each candidate based on:
-     - Normalized area (larger is better)
-     - Rectangularity (how close corner angles are to 90°)
-   - Select the highest-scoring quadrilateral
-
-6. **Fallback Strategy**
-   - If no valid quad found, use minAreaRect on largest contour (still avoiding border-touching)
-   - As last resort, use the absolute largest contour
-
-7. **Perspective Transformation**
-   - Order detected corners as: Top-Left, Top-Right, Bottom-Right, Bottom-Left
-   - Compute homography to map to fixed output dimensions (550×425)
-   - Warp using bicubic interpolation for smooth results
-
-## Methods Chosen
+## Specific Methods Chosen
 
 ### Binarization
-**Primary Methods (Dual-Path Approach):**
 
-1. **Adaptive Canny Edge Detection** (`auto_canny`)
-   - Automatically computes thresholds based on image median
-   - Lower threshold: `max(0, (1 - σ) × median)`
-   - Upper threshold: `min(255, (1 + σ) × median)`
-   - Rationale: Adapts to varying lighting conditions without manual tuning
+**Multi-Strategy Cascading Approach** - Each strategy only runs if previous ones fail:
 
-2. **Adaptive Threshold** (`cv2.adaptiveThreshold`)
-   - Method: Gaussian-weighted mean
-   - Inverted binary mode (document interior becomes white)
-   - Block size: Dynamically computed as `max(15, (min(h,w) // 20) // 2 * 2 + 1)`
-   - Constant: 5
-   - Rationale: Handles textured/gradient backgrounds where global thresholding fails
+1. **LAB Color Space + Otsu's Thresholding**
+   - Convert to LAB color space and extract L (lightness) channel
+   - Apply automatic Otsu thresholding: `cv2.threshold(l_channel, 0, 255, THRESH_BINARY + THRESH_OTSU)`
+   - **Why**: Ignores color variations in textured backgrounds (e.g., green/yellow grass) and focuses only on brightness differences
 
-**Why Dual-Path?**
-- Edge detection excels with clean backgrounds and strong document boundaries
-- Adaptive thresholding handles complex backgrounds with texture/patterns
-- Combining both increases robustness across diverse input conditions
+2. **Bilateral Filter + Canny Edge Detection**
+   - Bilateral filter parameters: diameter=11, sigmaColor=60, sigmaSpace=60
+   - Canny thresholds: lower=40, upper=120
+   - **Why**: Smooths texture noise while preserving document edges; good for clear boundaries
+
+3. **Adaptive Gaussian Thresholding**
+   - Block size: dynamically computed as ~4% of image dimension (minimum 11, must be odd)
+   - Constant: 10
+   - **Why**: Handles non-uniform lighting and gradient backgrounds
+
+4. **Simple Global Thresholding**
+   - Fixed threshold: 127
+   - **Why**: Fast fallback for high-contrast cases
 
 ### Edge/Contour Finding
-**Method:** `cv2.findContours` with `RETR_LIST` and `CHAIN_APPROX_SIMPLE`
 
-**Process:**
-1. Apply morphological closing with dynamically-sized kernel (1% of image dimensions)
-2. Apply single-iteration dilation with 3×3 kernel
-3. Extract all contours without hierarchy (`RETR_LIST`)
-4. Filter contours by:
-   - Minimum area threshold (5% of image area)
-   - Border proximity test (rejects if within 5px of edge)
-   - Perimeter-based approximation to 4 vertices
+**Method**: `cv2.findContours` with `RETR_EXTERNAL` and `CHAIN_APPROX_SIMPLE`
 
-**Rationale:**
-- Morphological operations connect broken edges while preserving shape
-- Border rejection prevents false positives from image frame
-- Simple chain approximation reduces memory while maintaining shape accuracy
+**Process**:
+1. Apply morphological closing (5×5 kernel, 1 iteration) to connect broken edges
+2. Apply erosion (3×3 kernel, 1 iteration) to shrink back to actual document edges
+3. Extract only external contours (avoids nested shapes from texture)
+4. Sort contours by area (largest first)
+5. Filter out contours that:
+   - Are smaller than 8% of image area
+   - Touch the image border (within 10 pixels)
+   - Cannot be approximated to 4 vertices
+
+**Why**: 
+- `RETR_EXTERNAL` prevents false positives from internal texture/text
+- Dilate-then-erode balances edge connectivity with precision
+- Border rejection prevents selecting the image frame
 
 ### Corner Localization
-**Method:** Douglas-Peucker Polygon Approximation (`cv2.approxPolyDP`)
 
-**Parameters:**
-- Epsilon: `0.02 × perimeter`
-- Closed contour: True
+**Method**: Multi-Epsilon Douglas-Peucker Approximation + Subpixel Refinement + Scoring
 
-**Scoring System:**
-Each 4-point candidate receives a composite score:
+**Polygon Approximation**:
+- Try multiple epsilon values: [0.005, 0.008, 0.01, 0.012, 0.015, 0.02] (fraction of perimeter)
+- Start with tightest approximation for better accuracy
+- Accept first 4-vertex approximation that passes validation
+
+**Validation**:
+- Corner angles must be between 50° and 130°
+- Quadrilateral must not touch border
+- Must be convex
+
+**Scoring Formula**:
 ```
-score = (area / image_area) + 0.5 × rectangularity_score
+score = (area × 0.5) - (angle_deviation × 150) - (aspect_diff × 5000)
 ```
+- `angle_deviation`: Sum of |90° - actual_angle| for all 4 corners
+- `aspect_diff`: Absolute difference from target aspect ratio (550/425 = 1.294)
+- Select highest-scoring candidate
 
-**Rectangularity Computation:**
-- For each corner, compute vectors to adjacent corners
-- Calculate absolute dot product of normalized vectors (cosine of angle)
-- Average all four corner cosines
-- Score = `1.0 - mean(cosines)` (closer to 1.0 = more rectangular)
+**Subpixel Refinement**:
+- Apply `cv2.cornerSubPix` with 5×5 window, 30 max iterations, 0.001 epsilon
+- Achieves corner accuracy within ~0.1 pixels
 
-**Corner Ordering:**
-After selection, corners are consistently ordered as TL, TR, BR, BL using:
-- TL: minimum sum of coordinates (x + y)
-- BR: maximum sum of coordinates
-- TR: minimum difference (y - x)
-- BL: maximum difference (y - x)
+**Corner Ordering**:
+- Sort points by y-coordinate to separate top and bottom pairs
+- Sort each pair by x-coordinate to get left and right
 
-**Rationale:**
-- 2% epsilon balances shape fidelity with noise tolerance
-- Composite scoring prefers large, rectangular regions (typical documents)
-- Geometric corner ordering ensures correct perspective transform regardless of input orientation
+**Inward Bias**:
+- Move each corner 1% toward document center: `corner_new = corner + (center - corner) × 0.01`
+- Prevents including shadows and edge artifacts
+
+**Why**:
+- Tighter epsilon values (0.5%-2% vs typical 2%) capture corners more accurately
+- Composite scoring prioritizes rectangularity and correct aspect ratio over just size
+- Subpixel refinement eliminates residual distortion
+- Inward bias excludes background transitions from final output
 
 ## Key Parameter Values
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
+| **Output Dimensions** | | |
 | `OUT_W` | 550 | Output width in pixels |
-| `OUT_H` | 425 | Output height in pixels |
-| `MIN_AREA_FRAC` | 0.05 | Minimum contour area as fraction of image (5%) |
-| `CANNY_SIGMA` | 0.33 | Sensitivity for auto-Canny thresholding |
-| `BORDER_PAD` | 5 | Pixel distance from edge to consider "border-touching" |
-| `CLAHE clipLimit` | 2.0 | Contrast limiting for adaptive histogram equalization |
-| `CLAHE tileGridSize` | (8, 8) | Grid size for localized contrast enhancement |
-| `Gaussian kernel` | (5, 5) | Blur kernel size for noise reduction |
-| `Morph kernel size` | `max(3, int(min(w,h) × 0.01) \| 1)` | Dynamically scaled to 1% of image dimension (odd) |
-| `approxPolyDP epsilon` | `0.02 × perimeter` | Polygon approximation tolerance (2% of perimeter) |
-| `Rectangularity weight` | 0.5 | Weight of angle-score in composite scoring |
-| `Adaptive threshold block` | `max(15, (min(h,w) // 20) // 2 * 2 + 1)` | Dynamic block size (≈5% of image, odd, min 15) |
-| `Adaptive threshold C` | 5 | Constant subtracted from weighted mean |
+| `OUT_H` | 425 | Output height (aspect ratio: 1.294) |
+| **Filtering** | | |
+| `MIN_AREA_FRAC` | 0.08 | Minimum contour area (8% of image) |
+| `BORDER_PAD` | 10 | Border exclusion distance (pixels) |
+| **Bilateral Filter** | | |
+| Diameter | 11 | Neighborhood size |
+| Sigma color/space | 60 / 60 | Filter strength |
+| **Canny Edge Detection** | | |
+| Lower threshold | 40 | Minimum edge strength |
+| Upper threshold | 120 | Strong edge threshold |
+| **Morphological Operations** | | |
+| Closing kernel | 5×5 | Rectangle kernel |
+| Closing iterations | 1 | Single pass |
+| Erosion kernel | 3×3 | Shrink kernel |
+| Erosion iterations | 1 | Pull back to edges |
+| **Adaptive Threshold** | | |
+| Block size | `max(11, (min(h,w)//25)\|1)` | Dynamic, ~4% of image (odd) |
+| Constant C | 10 | Offset from mean |
+| **Polygon Approximation** | | |
+| Epsilon values | [0.005, 0.008, 0.01, 0.012, 0.015, 0.02] | Fraction of perimeter |
+| Angle tolerance | 50° - 130° | Valid corner angles |
+| **Scoring Weights** | | |
+| Area weight | 0.5 | Normalized area factor |
+| Angle penalty | 150 | Per degree from 90° |
+| Aspect ratio penalty | 5000 | Per unit from target |
+| **Subpixel Refinement** | | |
+| Window size | 5×5 | Search neighborhood |
+| Max iterations | 30 | Convergence limit |
+| Epsilon | 0.001 | Convergence threshold |
+| **Perspective Transform** | | |
+| Inward bias | 0.01 (1%) | Corner adjustment factor |
+| Interpolation | `INTER_CUBIC` | Bicubic for smoothness |
+| Border mode | `BORDER_REPLICATE` | Edge pixel handling |
 
 ## Usage
 
@@ -139,16 +147,9 @@ After selection, corners are consistently ordered as TL, TR, BR, BL using:
 python3 rectify.py <input_folder>
 ```
 
-Outputs will be saved to `./outputs/` with format `output (N).jpg` where N is extracted from the input filename.
-
-### Optional Debug Mode
-Set environment variable to save detection overlays:
-```bash
-DEBUG_DIR=./debug python3 rectify.py <input_folder>
-```
+Outputs will be saved to `./outputs/` directory.
 
 ## Dependencies
-- OpenCV (cv2)
-- NumPy
-- Python 3.6+
-
+```bash
+pip install opencv-python numpy
+```

@@ -13,8 +13,6 @@ OUT_W, OUT_H = 550, 425
 MIN_AREA_FRAC = 0.08
 # px distance from frame to consider "touching"
 BORDER_PAD = 10
-# if set, write overlays here
-DEBUG_DIR = os.environ.get("DEBUG_DIR")
 
 
 def ensure_dir(p: Path):
@@ -214,7 +212,7 @@ def detect_document_quad(img):
     return best_quad
 
 
-def warp_document(img, filename="debug"):
+def warp_document(img):
     """Detect and rectify the document; returns rectified image or None if fails."""
     quad = detect_document_quad(img)
     if quad is None:
@@ -235,21 +233,6 @@ def warp_document(img, filename="debug"):
     rectified = cv2.warpPerspective(img, H, (OUT_W, OUT_H), 
                                     flags=cv2.INTER_CUBIC,
                                     borderMode=cv2.BORDER_REPLICATE)
-
-    if DEBUG_DIR:
-        ensure_dir(Path(DEBUG_DIR))
-        dbg = img.copy()
-        # Draw the detected quadrilateral
-        cv2.polylines(dbg, [src.astype(np.int32)], True, (0, 255, 0), 3)
-        # Draw corners with labels
-        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]  # TL, TR, BR, BL
-        labels = ['TL', 'TR', 'BR', 'BL']
-        for pt, color, label in zip(src, colors, labels):
-            pt = tuple(pt.astype(int))
-            cv2.circle(dbg, pt, 10, color, -1)
-            cv2.putText(dbg, label, (pt[0] + 15, pt[1] + 15), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
-        cv2.imwrite(str(Path(DEBUG_DIR) / f"debug_{filename}.jpg"), dbg)
     return rectified
 
 
@@ -270,7 +253,7 @@ def process_folder(in_dir: Path, out_dir: Path):
         match = re.search(r'\((\d+)\)', p.stem)
         num = match.group(1) if match else p.stem
         
-        rectified = warp_document(img, filename=num)
+        rectified = warp_document(img)
         if rectified is None:
             print(f"[WARN] Could not find a document in: {p.name}")
             cv2.imwrite(str(out_dir / f"FAILED_{num}.jpg"), img)
